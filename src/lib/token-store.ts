@@ -47,11 +47,49 @@ export async function getIdentityIdByTwitchUserId(twitchUserId: string) {
   return rows[0]?.id as string | undefined;
 }
 
+export async function setDefaultBot(
+  identityId: string,
+  opts?: { force?: boolean },
+) {
+  const force = opts?.force ?? false;
+
+  if (force) {
+    await sql`
+      insert into app_settings (id, default_bot_identity_id, updated_at)
+      values (true, ${identityId}, now())
+      on conflict (id)
+      do update set default_bot_identity_id = excluded.default_bot_identity_id,
+                    updated_at = now()
+    `;
+    return;
+  }
+
+  await sql`
+    insert into app_settings (id, default_bot_identity_id, updated_at)
+    values (true, ${identityId}, now())
+    on conflict (id)
+    do nothing
+  `;
+}
+
+export async function getDefaultBotIdentityId() {
+  const rows = await sql`
+    select default_bot_identity_id as id
+    from app_settings
+    where id = true
+    limit 1
+  `;
+  return rows[0]?.id as string | undefined;
+}
+
 export async function upsertInstallationDefaults(input: {
   broadcasterIdentityId: string;
-  mainBotIdentityId: string;
-  fallbackBotIdentityId: string;
 }) {
+  const defaultBotId = await getDefaultBotIdentityId();
+  if (!defaultBotId) {
+    throw new Error('app_settings.default_bot_identity_id_not_set');
+  }
+
   await sql`
     insert into bot_installations (
       broadcaster_identity_id,
@@ -62,8 +100,8 @@ export async function upsertInstallationDefaults(input: {
     )
     values (
       ${input.broadcasterIdentityId},
-      ${input.mainBotIdentityId},
-      ${input.fallbackBotIdentityId},
+      ${defaultBotId},
+      ${defaultBotId},
       true,
       now()
     )

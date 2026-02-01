@@ -6,6 +6,8 @@ import {
   upsertInstallationDefaults,
   setInstallationMainBot,
   getIdentityIdByTwitchUserId,
+  getDefaultBotIdentityId,
+  setDefaultBot,
 } from '@/lib/token-store';
 
 export async function GET(req: Request) {
@@ -104,19 +106,9 @@ export async function GET(req: Request) {
     expiresAt,
   });
 
-  const defaultBotLogin =
-    process.env.TWITCH_DEFAULT_BOT_LOGIN ?? 'michasiowy_bocik';
-  const defaultBotId = await getIdentityIdByLogin(defaultBotLogin);
-
-  // Jeśli nie ma default bota w DB, to nie ma co udawać
-  if (!defaultBotId && mode !== 'service_bot') {
-    return NextResponse.json(
-      {
-        error: 'default_bot_missing',
-        desc: `Brak identity dla ${defaultBotLogin} w DB. Najpierw zautoryzuj service bot: /api/auth/twitch?mode=service_bot`,
-      },
-      { status: 500 },
-    );
+  if (mode === 'service_bot') {
+    // ustaw default bota tylko jeśli jeszcze nie ustawiony
+    await setDefaultBot(identityId);
   }
 
   // Logika instalacji
@@ -124,8 +116,6 @@ export async function GET(req: Request) {
     // streamer podpina konto -> tworzysz instalację z mainem = default bot
     await upsertInstallationDefaults({
       broadcasterIdentityId: identityId,
-      mainBotIdentityId: defaultBotId!,
-      fallbackBotIdentityId: defaultBotId!,
     });
   }
 
@@ -145,10 +135,18 @@ export async function GET(req: Request) {
     }
 
     // ustaw main bota na custom bot identityId, fallback na default bot
+    const fallbackBotIdentityId = await getDefaultBotIdentityId();
+    if (!fallbackBotIdentityId) {
+      return NextResponse.json(
+        { error: 'default_bot_not_configured' },
+        { status: 500 },
+      );
+    }
+
     await setInstallationMainBot({
       broadcasterIdentityId: ownerBroadcasterId,
       mainBotIdentityId: identityId,
-      fallbackBotIdentityId: defaultBotId!,
+      fallbackBotIdentityId,
     });
   }
 
