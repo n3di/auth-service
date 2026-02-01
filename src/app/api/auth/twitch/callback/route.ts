@@ -1,6 +1,12 @@
 import { NextResponse } from 'next/server';
 import { cookies } from 'next/headers';
-import { saveUserToken } from '@/lib/token-store';
+import {
+  upsertIdentityAndToken,
+  getIdentityIdByLogin,
+  upsertInstallationDefaults,
+  setInstallationMainBot,
+  getIdentityIdByTwitchUserId,
+} from '@/lib/token-store';
 
 export async function GET(req: Request) {
   const url = new URL(req.url);
@@ -21,10 +27,15 @@ export async function GET(req: Request) {
     );
   }
 
-  const cookieState = (await cookies()).get('twitch_oauth_state')?.value;
+  const jar = await cookies();
+
+  const cookieState = jar.get('twitch_oauth_state')?.value;
   if (!cookieState || cookieState !== state) {
     return NextResponse.json({ error: 'invalid_state' }, { status: 400 });
   }
+
+  const mode = jar.get('twitch_oauth_mode')?.value ?? 'broadcaster';
+  const owner = jar.get('twitch_oauth_owner')?.value; // tylko custom_bot
 
   const clientId = process.env.TWITCH_CLIENT_ID!;
   const clientSecret = process.env.TWITCH_CLIENT_SECRET!;
@@ -83,8 +94,9 @@ export async function GET(req: Request) {
 
   const expiresAt = new Date(Date.now() + validate.expires_in * 1000);
 
-  await saveUserToken({
-    userId: validate.user_id,
+  // zapis do nowych tabel:
+  const identityId = await upsertIdentityAndToken({
+    twitchUserId: validate.user_id,
     login: validate.login,
     accessToken: token.access_token,
     refreshToken: token.refresh_token,
@@ -92,8 +104,59 @@ export async function GET(req: Request) {
     expiresAt,
   });
 
-  // cleanup cookie
+  const defaultBotLogin =
+    process.env.TWITCH_DEFAULT_BOT_LOGIN ?? 'michasiowy_bocik';
+  const defaultBotId = await getIdentityIdByLogin(defaultBotLogin);
+
+  // Jeśli nie ma default bota w DB, to nie ma co udawać
+  if (!defaultBotId && mode !== 'service_bot') {
+    return NextResponse.json(
+      {
+        error: 'default_bot_missing',
+        desc: `Brak identity dla ${defaultBotLogin} w DB. Najpierw zautoryzuj service bot: /api/auth/twitch?mode=service_bot`,
+      },
+      { status: 500 },
+    );
+  }
+
+  // Logika instalacji
+  if (mode === 'broadcaster') {
+    // streamer podpina konto -> tworzysz instalację z mainem = default bot
+    await upsertInstallationDefaults({
+      broadcasterIdentityId: identityId,
+      mainBotIdentityId: defaultBotId!,
+      fallbackBotIdentityId: defaultBotId!,
+    });
+  }
+
+  if (mode === 'custom_bot') {
+    if (!owner) {
+      return NextResponse.json(
+        { error: 'missing_owner_cookie' },
+        { status: 400 },
+      );
+    }
+
+    // owner to twitch_user_id streamera, który podpina custom bota
+    // TODO: tu koniecznie sprawdź w przyszłości, czy owner = zalogowany streamer z sesji
+    const ownerBroadcasterId = await getIdentityIdByTwitchUserId(owner);
+    if (!ownerBroadcasterId) {
+      return NextResponse.json({ error: 'owner_not_found' }, { status: 400 });
+    }
+
+    // ustaw main bota na custom bot identityId, fallback na default bot
+    await setInstallationMainBot({
+      broadcasterIdentityId: ownerBroadcasterId,
+      mainBotIdentityId: identityId,
+      fallbackBotIdentityId: defaultBotId!,
+    });
+  }
+
+  // mode === service_bot: tylko zapis tokenu default bota, bez instalacji
+
   const res = NextResponse.redirect(new URL('/auth/success', baseUrl));
   res.cookies.delete('twitch_oauth_state');
+  res.cookies.delete('twitch_oauth_mode');
+  res.cookies.delete('twitch_oauth_owner');
   return res;
 }
